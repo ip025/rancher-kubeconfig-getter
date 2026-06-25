@@ -1,9 +1,13 @@
-import requests
-import yaml
+"""
+Fetch kubeconfigs from one or more Rancher instances and combine them into a single kubeconfig file.
+"""
+# pylint: disable=invalid-name
 import getpass
 import argparse
 import os
 import sys
+import requests  # pylint: disable=import-error
+import yaml  # pylint: disable=import-error
 
 combined_kubeconfig = {
     'apiVersion': 'v1',
@@ -15,12 +19,13 @@ combined_kubeconfig = {
 }
 
 
-def get_rancher_token(rancher_url, username, password):
-    login_url = f'{rancher_url}/v1-public/login'
+def get_rancher_token(url, user, pwd):
+    """Authenticate with Rancher and return a session token."""
+    login_url = f'{url}/v1-public/login'
     payload = {
         'type': 'activeDirectoryProvider',
-        'username': username,
-        'password': password,
+        'username': user,
+        'password': pwd,
         'description': 'rancher-kubeconfig-getter',
         'responseType': 'cookie',
         'ttl': 3600,
@@ -29,34 +34,35 @@ def get_rancher_token(rancher_url, username, password):
     if response.status_code != 200:
         print(f"  Login failed: {response.status_code} - {response.text}")
         return None
-    token = response.cookies.get('R_SESS')
-    if not token:
-        print(f"  Login succeeded but no R_SESS cookie received")
+    session_token = response.cookies.get('R_SESS')
+    if not session_token:
+        print("  Login succeeded but no R_SESS cookie received")
         return None
-    return token
+    return session_token
 
 
-def fetch_kubeconfigs_from_rancher(rancher_url, api_token):
+def fetch_kubeconfigs_from_rancher(url, api_token):
+    """Fetch kubeconfigs for all clusters from a Rancher instance."""
     headers = {
         'Authorization': f'Bearer {api_token}'
     }
 
-    response = requests.get(f'{rancher_url}/v3/clusters', headers=headers)
+    response = requests.get(f'{url}/v3/clusters', headers=headers)
 
     if response.status_code != 200:
         print(f"  Failed to list clusters: {response.status_code} - {response.text}")
         return [], []
 
     clusters = response.json().get('data', [])
-    succeeded = []
-    failed = []
+    succeeded_list = []
+    failed_list = []
 
     for cluster in clusters:
         cluster_id = cluster['id']
         cluster_name = cluster['name']
 
         kubeconfig_response = requests.post(
-            f'{rancher_url}/v3/clusters/{cluster_id}?action=generateKubeconfig',
+            f'{url}/v3/clusters/{cluster_id}?action=generateKubeconfig',
             headers=headers,
         )
 
@@ -69,34 +75,42 @@ def fetch_kubeconfigs_from_rancher(rancher_url, api_token):
                 combined_kubeconfig['users'].extend(kubeconfig_data['users'])
                 combined_kubeconfig['contexts'].extend(kubeconfig_data['contexts'])
 
-                if combined_kubeconfig['current-context'] is None and kubeconfig_data.get('current-context'):
+                if combined_kubeconfig['current-context'] is None \
+                        and kubeconfig_data.get('current-context'):
                     combined_kubeconfig['current-context'] = kubeconfig_data['current-context']
 
-                succeeded.append(cluster_name)
+                succeeded_list.append(cluster_name)
             else:
-                failed.append((cluster_name, 'No config returned'))
+                failed_list.append((cluster_name, 'No config returned'))
         else:
-            failed.append((cluster_name, f'{kubeconfig_response.status_code} - {kubeconfig_response.text}'))
+            failed_list.append(
+                (cluster_name,
+                 f'{kubeconfig_response.status_code} - {kubeconfig_response.text}')
+            )
 
-    return succeeded, failed
+    return succeeded_list, failed_list
 
 
 def load_config(config_path):
-    with open(config_path) as f:
+    """Load Rancher URLs from the YAML config file."""
+    with open(config_path, encoding='utf-8') as f:
         config = yaml.safe_load(f)
     urls = config.get('rancher_urls', [])
     if not urls:
         print(f"Error: 'rancher_urls' list is empty or missing in '{config_path}'")
         sys.exit(1)
     if not all(isinstance(u, str) for u in urls):
-        print(f"Error: all entries in 'rancher_urls' must be strings")
+        print("Error: all entries in 'rancher_urls' must be strings")
         sys.exit(1)
     return urls
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Fetch kubeconfigs from Rancher instances')
-    parser.add_argument('--config', default='rancher-endpoints.yaml', help='Path to config file (default: rancher-endpoints.yaml)')
+    parser = argparse.ArgumentParser(
+        description='Fetch kubeconfigs from Rancher instances')
+    parser.add_argument(
+        '--config', default='rancher-endpoints.yaml',
+        help='Path to config file (default: rancher-endpoints.yaml)')
     args = parser.parse_args()
 
     if not os.path.exists(args.config):
@@ -110,29 +124,29 @@ if __name__ == '__main__':
 
     skipped_instances = []
 
-    for rancher_url in rancher_urls:
-        print(f"\n{rancher_url}")
-        token = get_rancher_token(rancher_url, username, password)
+    for url in rancher_urls:
+        print(f"\n{url}")
+        token = get_rancher_token(url, username, password)
         if token is None:
-            print(f"  Skipped (login failed).")
-            skipped_instances.append(rancher_url)
+            print("  Skipped (login failed).")
+            skipped_instances.append(url)
             continue
-        succeeded, failed = fetch_kubeconfigs_from_rancher(rancher_url, token)
-        for name in succeeded:
+        succeeded_list, failed_list = fetch_kubeconfigs_from_rancher(url, token)
+        for name in succeeded_list:
             print(f"  + {name}")
-        for name, reason in failed:
+        for name, reason in failed_list:
             print(f"  - {name} ({reason})")
-        if not succeeded and not failed:
-            print(f"  No clusters found.")
+        if not succeeded_list and not failed_list:
+            print("  No clusters found.")
 
     print("")
 
     if skipped_instances:
-        print(f"Skipped instances (login failure):")
+        print("Skipped instances (login failure):")
         for url in skipped_instances:
             print(f"  - {url}")
 
-    with open('combined-kubeconfig.yaml', 'w') as combined_file:
+    with open('combined-kubeconfig.yaml', 'w', encoding='utf-8') as combined_file:
         yaml.dump(combined_kubeconfig, combined_file)
 
-    print(f"\nCombined kubeconfig saved as 'combined-kubeconfig.yaml'.")
+    print("\nCombined kubeconfig saved as 'combined-kubeconfig.yaml'.")
